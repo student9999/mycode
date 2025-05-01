@@ -31,13 +31,14 @@ module axis_ipv4_to_axi4_writer #(
 
 localparam BEAT_BYTES = DATA_WIDTH / 8;
 localparam BUFFER_WORDS = BUFFER_DEPTH / BEAT_BYTES;
-localparam SIZE_CODE = $clog2 BEAT_BYTES;
+localparam SIZE_CODE = $clog2(BEAT_BYTES);
 
 typedef enum logic [1:0] {RX_IDLE, RX_STORE} rx_state_t;
 typedef enum logic [1:0] {TX_IDLE, TX_ADDR, TX_DATA, TX_RESP} tx_state_t;
 
 rx_state_t rx_state = RX_IDLE;
-logic [$clog2 BUFFER_WORDS-1:0] rx_wr_ptr = 0;
+tx_state_t tx_state = TX_IDLE;
+logic [$clog2(BUFFER_WORDS)-1:0] rx_wr_ptr = 0;
 logic [15:0] rx_packet_len = 0;
 logic [15:0] rx_byte_cnt = 0;
 
@@ -60,18 +61,24 @@ always_ff @(posedge clk or negedge rst_n) if (!rst_n) begin
   rx_packet_len <= 0;
   rx_byte_cnt <= 0;
   packet_ready <= 0;
-end else case (rx_state)
+end else begin case (rx_state)
   RX_IDLE: if (s_axis_tvalid && s_axis_tready) begin
     rx_packet_len <= total_length_field;
     rx_wr_ptr <= 0;
     rx_byte_cnt <= BEAT_BYTES;
-    ~active_buf_sel ? buffer0[0] : buffer1[0] <= s_axis_tdata;
+    if (~active_buf_sel)
+      buffer0[0] <= s_axis_tdata;
+    else
+      buffer1[0] <= s_axis_tdata;
     rx_state <= RX_STORE;
   end
   RX_STORE: if (s_axis_tvalid && s_axis_tready) begin
     rx_wr_ptr <= rx_wr_ptr + 1;
     rx_byte_cnt <= rx_byte_cnt + BEAT_BYTES;
-    ~active_buf_sel ? buffer0[rx_wr_ptr + 1] : buffer1[rx_wr_ptr + 1] <= s_axis_tdata;
+    if (~active_buf_sel)
+      buffer0[rx_wr_ptr + 1] <= s_axis_tdata;
+    else
+      buffer1[rx_wr_ptr + 1] <= s_axis_tdata;
     if (s_axis_tlast) begin
       packet_ready <= 1;
       packet_len_saved <= rx_packet_len;
@@ -80,10 +87,12 @@ end else case (rx_state)
       rx_state <= RX_IDLE;
     end
   end
-endcase
+  endcase
+  if (TX_RESP==tx_state && m_axi_bvalid)
+    packet_ready <= 0;
+end
 
-tx_state_t tx_state = TX_IDLE;
-logic [$clog2 BUFFER_WORDS-1:0] tx_rd_ptr = 0;
+logic [$clog2(BUFFER_WORDS)-1:0] tx_rd_ptr = 0;
 logic [15:0] tx_byte_cnt = 0;
 logic [ADDR_WIDTH-1:0] tx_addr = 0;
 
@@ -127,7 +136,7 @@ end else case (tx_state)
       m_axi_wvalid <= 1;
       m_axi_wlast <= packet_len_saved - tx_byte_cnt <= BEAT_BYTES;
       m_axi_wstrb <= packet_len_saved - tx_byte_cnt <= BEAT_BYTES ?
-                     { {(DATA_WIDTH/8){1}} } >> (BEAT_BYTES - (packet_len_saved - tx_byte_cnt)) : '1;
+                     {(DATA_WIDTH/8){1'b1}} >> (BEAT_BYTES - (packet_len_saved - tx_byte_cnt)) : '1;
       tx_byte_cnt <= tx_byte_cnt + BEAT_BYTES;
       tx_rd_ptr <= tx_rd_ptr + 1;
       if (packet_len_saved - tx_byte_cnt <= BEAT_BYTES)
@@ -140,7 +149,6 @@ end else case (tx_state)
   end
   TX_RESP: if (m_axi_bvalid) begin
     tx_state <= TX_IDLE;
-    packet_ready <= 0;
     m_axi_wvalid <= 0;
     m_axi_wlast <= 0;
     tx_addr <= tx_addr + ((packet_len_saved + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;

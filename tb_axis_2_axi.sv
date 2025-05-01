@@ -27,7 +27,7 @@ module axis_ipv4_to_axi4_writer_tb;
   logic m_axi_wready;
   logic [ID_WIDTH-1:0] m_axi_bid;
   logic [1:0] m_axi_bresp;
-  logic m_axi_bvalid;
+  logic m_axi_bvalid=0;
   logic m_axi_bready;
   logic [ADDR_WIDTH-1:0] base_addr;
 
@@ -50,7 +50,7 @@ module axis_ipv4_to_axi4_writer_tb;
   endtask
 
   task send_ipv4_packet(input int pkt_len);
-    int beats = (pkt_len + BEAT_BYTES - 1) / BEAT_BYTES;
+    automatic int beats = (pkt_len + BEAT_BYTES - 1) / BEAT_BYTES;
     s_axis_tvalid = 1;
     s_axis_tlast = 0;
 
@@ -58,7 +58,7 @@ module axis_ipv4_to_axi4_writer_tb;
       s_axis_tdata = $urandom;
       if (i == 0) begin
         // Set total length field at byte 16 and 17 (big endian)
-        s_axis_tdata[143:128] = {8'h00, pkt_len[15:8], pkt_len[7:0], 8'h00};
+        s_axis_tdata[143:128] = {pkt_len[7:0], pkt_len[15:8]};
       end
       if (i == beats-1) s_axis_tlast = 1;
       wait (s_axis_tready);
@@ -72,7 +72,6 @@ module axis_ipv4_to_axi4_writer_tb;
   initial begin
     m_axi_awready = 1;
     m_axi_wready = 1;
-    m_axi_bvalid = 0;
     base_addr = 32'h1000_0000;
 
     reset();
