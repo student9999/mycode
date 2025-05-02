@@ -1,0 +1,107 @@
+#!/bin/bash
+
+# VCS Compile and Simulate Script with Verdi wave dumping and KDB generation
+# Usage: ./compile_and_sim.vcs [top_module_name]
+
+# Exit on any error
+set -e 
+
+# Default values
+TOP_MODULE=tb_axis_2_axi
+TIMESCALE="1ns/1ps"
+
+# VCS and Verdi specific flags
+VCS_FLAGS="-full64 -debug_all -sverilog -timescale=${TIMESCALE} -kdb -debug_access+all"
+VERDI_FLAGS="-debug_acc+all -debug_region+cell+encrypt"
+FSDB_FLAGS="+fsdb+all=on +fsdb+function=on +fsdb+force=on +fsdb+memory=on"
+PLI_FLAGS="-P ${NOVAS_HOME}/share/PLI/VCS/LINUX64/novas.tab ${NOVAS_HOME}/share/PLI/VCS/LINUX64/pli.a"
+
+# Simulation flags
+SIM_FLAGS="+notimingchecks"
+
+# Add flags for running until $finish
+RUN_FLAGS="+plusarg_save +warn=all +vcs+lic+wait +error+100 +ntb_random_seed=1"
+RUN_FLAGS="${RUN_FLAGS} +warn=noTFIPC +lint=TFIPC-L"  # Suppress some common warnings
+RUN_FLAGS="${RUN_FLAGS} +vcs+flush+all +vcs+lic+wait"  # Handle licensing and flushing
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# File lists
+RTL_FILES="./rtl_files.f"
+TB_FILES="./tb_files.f"
+
+# Create simulation directory
+SIM_DIR="./sim_out"
+mkdir -p ${SIM_DIR}
+
+echo -e "${GREEN}Starting VCS Compilation with Verdi wave dumping...${NC}"
+
+# Check for required files
+if [ ! -f ${RTL_FILES} ]; then
+    echo -e "${RED}Error: RTL filelist ${RTL_FILES} not found!${NC}"
+    exit 1
+fi
+
+if [ ! -f ${TB_FILES} ]; then
+    echo -e "${RED}Error: Testbench filelist ${TB_FILES} not found!${NC}"
+    exit 1
+fi
+
+# Check if NOVAS_HOME is set
+if [ -z ${NOVAS_HOME} ]; then
+    echo -e "${RED}Error: NOVAS_HOME environment variable is not set!${NC}"
+    exit 1
+fi
+
+# Compile command
+vcs ${VCS_FLAGS} \
+    ${VERDI_FLAGS} \
+    ${PLI_FLAGS} \
+    -f ${RTL_FILES} \
+    -f ${TB_FILES} \
+    -top ${TOP_MODULE} \
+    -o ${SIM_DIR}/sim_exe \
+    2>&1 | tee ${SIM_DIR}/compile.log
+
+# Check if compilation was successful
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}Compilation completed successfully!${NC}"
+    echo "Executable 'sim_exe' created in ${SIM_DIR}"
+    
+    # Run simulation
+    echo -e "${YELLOW}Starting simulation...${NC}"
+    cd ${SIM_DIR}
+    
+    # Run simulation with timeout protection
+    timeout 24h ./sim_exe ${FSDB_FLAGS} ${SIM_FLAGS} ${RUN_FLAGS} 2>&1 | tee sim.log
+    
+    SIM_STATUS=${PIPESTATUS[0]}
+    
+    if [ $SIM_STATUS -eq 124 ]; then
+        echo -e "${RED}Simulation timed out after 24 hours!${NC}"
+        exit 1
+    elif [ $SIM_STATUS -eq 0 ]; then
+        echo -e "${GREEN}Simulation completed successfully!${NC}"
+        
+        # Check if $finish was called (look for typical end-of-simulation messages)
+        if grep -q "Simulation complete" sim.log || grep -q "\$finish" sim.log; then
+            echo -e "${GREEN}Simulation finished normally with \$finish${NC}"
+        else
+            echo -e "${YELLOW}Warning: Simulation ended but \$finish was not detected${NC}"
+        fi
+        
+        echo "Check ${SIM_DIR}/sim.log for simulation output"
+        echo "FSDB waveform file has been generated (if enabled in testbench)"
+        echo "KDB database has been generated for Verdi source code browsing"
+    else
+        echo -e "${RED}Simulation failed with status ${SIM_STATUS}! Check ${SIM_DIR}/sim.log for details${NC}"
+        exit 1
+    fi
+else
+    echo -e "${RED}Compilation failed! Check ${SIM_DIR}/compile.log for details${NC}"
+    exit 1
+fi

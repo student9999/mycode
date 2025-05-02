@@ -1,0 +1,16 @@
+#!/bin/bash
+
+SIM_DIR="./sim_out"
+FSDB_FILE="${SIM_DIR}/waves.fsdb"
+
+if [ ! -f ${FSDB_FILE} ]; then
+    echo "Error: FSDB file not found at ${FSDB_FILE}"
+    exit 1
+fi
+
+if [ ! -d csrc ]; then
+    echo "Error: KDB directory not found"
+    exit 1
+fi
+
+verdi -base -ssf ${FSDB_FILE} -kdb -nologo
