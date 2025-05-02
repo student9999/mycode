@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-module axis_ipv4_to_axi4_writer_tb;
+module tb_axis_2_axi;
 
   parameter ADDR_WIDTH = 32;
   parameter DATA_WIDTH = 512;
@@ -8,7 +8,7 @@ module axis_ipv4_to_axi4_writer_tb;
   parameter BEAT_BYTES = DATA_WIDTH / 8;
 
   logic clk;
-  logic rst_n;
+  logic rst;
   logic [DATA_WIDTH-1:0] s_axis_tdata;
   logic s_axis_tvalid;
   logic s_axis_tready;
@@ -29,9 +29,8 @@ module axis_ipv4_to_axi4_writer_tb;
   logic [1:0] m_axi_bresp;
   logic m_axi_bvalid=0;
   logic m_axi_bready;
-  logic [ADDR_WIDTH-1:0] base_addr;
 
-  axis_ipv4_to_axi4_writer #(
+  axis_2_axi #(
     .ADDR_WIDTH(ADDR_WIDTH),
     .DATA_WIDTH(DATA_WIDTH),
     .ID_WIDTH(ID_WIDTH)
@@ -44,35 +43,34 @@ module axis_ipv4_to_axi4_writer_tb;
   end
 
   task reset();
-    rst_n = 0;
+    rst <= 1;
     repeat (5) @(posedge clk);
-    rst_n = 1;
+    rst <= 0;
   endtask
 
   task send_ipv4_packet(input int pkt_len);
     automatic int beats = (pkt_len + BEAT_BYTES - 1) / BEAT_BYTES;
-    s_axis_tvalid = 1;
-    s_axis_tlast = 0;
+    s_axis_tvalid <= 1;
+    s_axis_tlast <= 0;
 
     for (int i = 0; i < beats; i++) begin
-      s_axis_tdata = $urandom;
+      s_axis_tdata <= $urandom;
       if (i == 0) begin
         // Set total length field at byte 16 and 17 (big endian)
-        s_axis_tdata[143:128] = {pkt_len[7:0], pkt_len[15:8]};
+        s_axis_tdata[143:128] <= {pkt_len[7:0], pkt_len[15:8]};
       end
-      if (i == beats-1) s_axis_tlast = 1;
+      if (i == beats-1) s_axis_tlast <= 1;
       wait (s_axis_tready);
       @(posedge clk);
     end
 
-    s_axis_tvalid = 0;
-    s_axis_tlast = 0;
+    s_axis_tvalid <= 0;
+    s_axis_tlast <= 0;
   endtask
 
   initial begin
-    m_axi_awready = 1;
-    m_axi_wready = 1;
-    base_addr = 32'h1000_0000;
+    m_axi_awready <= 1;
+    m_axi_wready <= 1;
 
     reset();
 
@@ -92,5 +90,11 @@ module axis_ipv4_to_axi4_writer_tb;
       m_axi_bvalid <= 0;
     end
   end
+
+initial begin
+    $fsdbDumpfile("waves.fsdb");
+    $fsdbDumpvars(0, axis_2_axi);
+    // Optional: $fsdbDumpMDA(); // For dumping memory arrays
+end
 
 endmodule
