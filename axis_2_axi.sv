@@ -1,11 +1,11 @@
-module axis_ipv4_to_axi4_writer #(
+module axis_2_axi #(
   parameter ADDR_WIDTH = 32,
   parameter DATA_WIDTH = 512,
   parameter ID_WIDTH   = 4,
   parameter BUFFER_DEPTH = 2048
 )(
   input  logic clk,
-  input  logic rst_n,
+  input  logic rst,
   input  logic [DATA_WIDTH-1:0] s_axis_tdata,
   input  logic s_axis_tvalid,
   output logic s_axis_tready,
@@ -25,134 +25,142 @@ module axis_ipv4_to_axi4_writer #(
   input  logic [ID_WIDTH-1:0] m_axi_bid,
   input  logic [1:0] m_axi_bresp,
   input  logic m_axi_bvalid,
-  output logic m_axi_bready,
-  input  logic [ADDR_WIDTH-1:0] base_addr
+  output logic m_axi_bready
 );
 
 localparam BEAT_BYTES = DATA_WIDTH / 8;
 localparam BUFFER_WORDS = BUFFER_DEPTH / BEAT_BYTES;
 localparam SIZE_CODE = $clog2(BEAT_BYTES);
 
-typedef enum logic [1:0] {RX_IDLE, RX_STORE} rx_state_t;
-typedef enum logic [1:0] {TX_IDLE, TX_ADDR, TX_DATA, TX_RESP} tx_state_t;
+typedef enum logic [1:0] {
+  TX_IDLE,
+  TX_ADDR, //AXI address phase
+  TX_DATA, //AXI data phase
+  TX_RESP  //AXI response phase
+  } tx_state_t;
 
-rx_state_t rx_state = RX_IDLE;
 tx_state_t tx_state = TX_IDLE;
-logic [$clog2(BUFFER_WORDS)-1:0] rx_wr_ptr = 0;
-logic [15:0] rx_packet_len = 0;
-logic [15:0] rx_byte_cnt = 0;
+logic pld_valid;
+logic [$clog2(BUFFER_WORDS)-1:0] rx_wr_ptr;
+logic [15:0] packet_len;
 
 logic [DATA_WIDTH-1:0] buffer0 [0:BUFFER_WORDS-1];
 logic [DATA_WIDTH-1:0] buffer1 [0:BUFFER_WORDS-1];
-logic active_buf_sel = 0;
+logic [DATA_WIDTH-1:0] buffer0_dout;
+logic [DATA_WIDTH-1:0] buffer1_dout;
+logic wr_buf_sel; //0 = selected buffer0, 1 = selected buffer1
+logic rd_buf_sel;
 
-logic packet_ready = 0;
-logic [15:0] packet_len_saved = 0;
-logic tx_buf_sel = 0;
+logic packet_ready;
 
 logic [15:0] total_length_field;
 assign total_length_field = {s_axis_tdata[135:128], s_axis_tdata[143:136]};
 
-assign s_axis_tready = rx_state != RX_IDLE || !packet_ready || tx_buf_sel != active_buf_sel;
+assign s_axis_tready = pld_valid || !packet_ready || rd_buf_sel != wr_buf_sel;
 
-always_ff @(posedge clk or negedge rst_n) if (!rst_n) begin
-  rx_state <= RX_IDLE;
-  rx_wr_ptr <= 0;
-  rx_packet_len <= 0;
-  rx_byte_cnt <= 0;
-  packet_ready <= 0;
-end else begin case (rx_state)
-  RX_IDLE: if (s_axis_tvalid && s_axis_tready) begin
-    rx_packet_len <= total_length_field;
-    rx_wr_ptr <= 0;
-    rx_byte_cnt <= BEAT_BYTES;
-    if (~active_buf_sel)
-      buffer0[0] <= s_axis_tdata;
+//receive packets from the AXI stream interface
+//back to back packets are supported
+always_ff @(posedge clk)
+ if (rst) begin
+  pld_valid <= '0;
+  rx_wr_ptr <= '0;
+  packet_ready <= '0;
+  wr_buf_sel <= '0;
+  rd_buf_sel <= '0;
+end else begin 
+  if (s_axis_tvalid && s_axis_tready) begin
+    if (~wr_buf_sel)
+      buffer0[rx_wr_ptr] <= s_axis_tdata;
     else
-      buffer1[0] <= s_axis_tdata;
-    rx_state <= RX_STORE;
-  end
-  RX_STORE: if (s_axis_tvalid && s_axis_tready) begin
-    rx_wr_ptr <= rx_wr_ptr + 1;
-    rx_byte_cnt <= rx_byte_cnt + BEAT_BYTES;
-    if (~active_buf_sel)
-      buffer0[rx_wr_ptr + 1] <= s_axis_tdata;
-    else
-      buffer1[rx_wr_ptr + 1] <= s_axis_tdata;
+      buffer1[rx_wr_ptr] <= s_axis_tdata;
     if (s_axis_tlast) begin
+      wr_buf_sel <= ~wr_buf_sel;
+      rx_wr_ptr <= '0;
       packet_ready <= 1;
-      packet_len_saved <= rx_packet_len;
-      tx_buf_sel <= active_buf_sel;
-      active_buf_sel <= ~active_buf_sel;
-      rx_state <= RX_IDLE;
+      rd_buf_sel <= wr_buf_sel; //set read buffer to the one just written
+      pld_valid <= '0;
+    end else begin //if there is still more data to write
+      rx_wr_ptr <= rx_wr_ptr+1;
+      pld_valid <= 1;
     end
-  end
-  endcase
+    //store the length of the packet during the header phase
+    if (~pld_valid)
+      packet_len <= total_length_field;
+  end 
+  //clear the packet_ready flag when the buffer is read
   if (TX_RESP==tx_state && m_axi_bvalid)
     packet_ready <= 0;
-end
+  end
 
-logic [$clog2(BUFFER_WORDS)-1:0] tx_rd_ptr = 0;
-logic [15:0] tx_byte_cnt = 0;
-logic [ADDR_WIDTH-1:0] tx_addr = 0;
+logic [$clog2(BUFFER_WORDS)-1:0] tx_rd_ptr;
+logic [15:0] tx_byte_cnt;
+logic [ADDR_WIDTH-1:0] ddr_wr_addr;
 
-logic [DATA_WIDTH-1:0] tx_data_stage1 = 0;
-logic [DATA_WIDTH-1:0] tx_data_stage2 = 0;
+logic wvalid_stage1;
+logic tx_data_cmpl;
 
 assign m_axi_awid     = '0;
 assign m_axi_awburst  = 2'b01;
 assign m_axi_awsize   = SIZE_CODE;
 assign m_axi_bready   = 1;
+assign tx_data_cmpl = tx_byte_cnt+BEAT_BYTES >= packet_len;
 
-always_ff @(posedge clk or negedge rst_n) if (!rst_n) begin
-  tx_state <= TX_IDLE;
-  m_axi_awvalid <= 0;
-  m_axi_wvalid  <= 0;
-  m_axi_wlast   <= 0;
-  m_axi_awaddr  <= 0;
-  tx_byte_cnt   <= 0;
-  tx_rd_ptr     <= 0;
-  tx_addr       <= base_addr;
-  tx_data_stage1 <= 0;
-  tx_data_stage2 <= 0;
-end else case (tx_state)
-  TX_IDLE: if (packet_ready && tx_buf_sel != active_buf_sel) begin
-    m_axi_awvalid <= 1;
-    m_axi_awaddr  <= tx_addr;
-    m_axi_awlen   <= (packet_len_saved + BEAT_BYTES - 1) / BEAT_BYTES - 1;
-    tx_data_stage1 <= ~tx_buf_sel ? buffer0[0] : buffer1[0];
-    m_axi_wvalid <= 0;
-    tx_state <= m_axi_awready ? TX_DATA : TX_ADDR;
-    tx_byte_cnt <= BEAT_BYTES;
-    tx_rd_ptr <= 1;
-  end
-  TX_ADDR: if (m_axi_awready) begin
-    m_axi_awvalid <= 0;
-    tx_state <= TX_DATA;
-  end
-  TX_DATA: begin
-    if (m_axi_wready) begin
-      m_axi_wdata <= tx_data_stage2;
-      m_axi_wvalid <= 1;
-      m_axi_wlast <= packet_len_saved - tx_byte_cnt <= BEAT_BYTES;
-      m_axi_wstrb <= packet_len_saved - tx_byte_cnt <= BEAT_BYTES ?
-                     {(DATA_WIDTH/8){1'b1}} >> (BEAT_BYTES - (packet_len_saved - tx_byte_cnt)) : '1;
-      tx_byte_cnt <= tx_byte_cnt + BEAT_BYTES;
-      tx_rd_ptr <= tx_rd_ptr + 1;
-      if (packet_len_saved - tx_byte_cnt <= BEAT_BYTES)
-        tx_state <= TX_RESP;
-    end else
-      m_axi_wvalid <= 0;
-
-    tx_data_stage2 <= tx_data_stage1;
-    tx_data_stage1 <= ~tx_buf_sel ? buffer0[tx_rd_ptr] : buffer1[tx_rd_ptr];
-  end
-  TX_RESP: if (m_axi_bvalid) begin
+always_ff @(posedge clk) begin
+  if (rst) begin
     tx_state <= TX_IDLE;
-    m_axi_wvalid <= 0;
-    m_axi_wlast <= 0;
-    tx_addr <= tx_addr + ((packet_len_saved + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;
-  end
-endcase
+    m_axi_awvalid <= '0;
+    m_axi_wvalid <= '0;
+    m_axi_wlast <= '0;
+    m_axi_awlen <= '0;
+    tx_byte_cnt <= '0;
+    tx_rd_ptr <= '0;
+    ddr_wr_addr <= '0;
+    wvalid_stage1 <= '0;
+    m_axi_wstrb <= '0;
+  end else case (tx_state)
+    TX_IDLE: if (packet_ready && rd_buf_sel != wr_buf_sel) begin
+      m_axi_awvalid <= 1;
+      m_axi_awlen   <= (packet_len + BEAT_BYTES - 1) / BEAT_BYTES - 1;
+      tx_state <= m_axi_awready ? TX_DATA : TX_ADDR; //skip to TX_DATA state if the address is accepted
+      tx_rd_ptr <= 0;
+    end
+    TX_ADDR: if (m_axi_awready) begin //once the address is accepted start the data phase
+      m_axi_awvalid <= 0;
+      tx_state <= TX_DATA;
+    end
+    TX_DATA: begin
+      wvalid_stage1 <= m_axi_wready; //add delay to wait for buffer data
+      m_axi_wvalid <= wvalid_stage1;
+      if (wvalid_stage1) begin               
+        if (tx_data_cmpl)
+          tx_state <= TX_RESP;
+        else
+          tx_byte_cnt <= tx_byte_cnt + BEAT_BYTES;
+        m_axi_wlast <= tx_data_cmpl;
+        m_axi_wstrb <= tx_data_cmpl ?{(DATA_WIDTH/8){1'b1}} >> (BEAT_BYTES - (packet_len - tx_byte_cnt)) : '1;
+      end
+      if (m_axi_wready)
+        tx_rd_ptr <= tx_rd_ptr + 1;        
+      end
+    TX_RESP: begin
+      if (m_axi_bvalid) begin
+        tx_state <= TX_IDLE;
+        ddr_wr_addr <= ddr_wr_addr + ((packet_len + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;
+      end
+      wvalid_stage1 <= '0;
+      m_axi_wvalid <= '0;
+      tx_rd_ptr <='0;
+      tx_byte_cnt <= 0;
+      m_axi_wlast <= '0';
+    end
+  endcase
+  //RAM latency = 2
+  buffer0_dout <= buffer0[tx_rd_ptr];
+  buffer1_dout <= buffer1[tx_rd_ptr];
+  m_axi_wdata <= ~rd_buf_sel ? buffer0_dout : buffer1_dout;
+  //To make timing easier
+  m_axi_awaddr  <= ddr_wr_addr;
+end
+
 
 endmodule
