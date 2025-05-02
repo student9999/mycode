@@ -1,4 +1,5 @@
 vlog ../*.sv
-vsim -voptargs=+acc work.axis_ipv4_to_axi4_writer_tb
+vsim -voptargs=+acc work.tb_mrmac_2_ddr
 log -r /*
 do wave.do
+run -all
