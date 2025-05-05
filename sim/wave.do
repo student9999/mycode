@@ -14,10 +14,11 @@ add wave -noupdate /tb/dut/s_axis_tready
 add wave -noupdate /tb/dut/s_axis_tlast
 add wave -noupdate /tb/dut/m_axi_awid
 add wave -noupdate /tb/dut/m_axi_awaddr
+add wave -noupdate /tb/dut/ddr_wr_ptr
 add wave -noupdate /tb/dut/m_axi_awlen
 add wave -noupdate /tb/dut/m_axi_awsize
 add wave -noupdate /tb/dut/m_axi_awburst
-add wave -noupdate /tb/dut/m_axi_awvalid
+add wave -noupdate -color Magenta /tb/dut/m_axi_awvalid
 add wave -noupdate /tb/dut/m_axi_awready
 add wave -noupdate /tb/dut/m_axi_wdata
 add wave -noupdate /tb/dut/m_axi_wstrb
@@ -25,6 +26,7 @@ add wave -noupdate /tb/dut/m_axi_wlast
 add wave -noupdate /tb/dut/m_axi_wvalid
 add wave -noupdate /tb/dut/m_axi_wready
 add wave -noupdate /tb/dut/m_axi_bready
+add wave -noupdate /tb/dut/header_beat
 add wave -noupdate /tb/dut/fifo
 add wave -noupdate /tb/dut/wr_ptr
 add wave -noupdate /tb/dut/rd_ptr
@@ -33,9 +35,8 @@ add wave -noupdate /tb/dut/fifo_full
 add wave -noupdate /tb/dut/fifo_empty
 add wave -noupdate /tb/dut/pkt_dropping
 add wave -noupdate /tb/dut/fifo_out_d2
-add wave -noupdate /tb/dut/ddr_wr_ptr
 TreeUpdate [SetDefaultTree]
-WaveRestoreCursors {{Cursor 1} {231712 ps} 0}
+WaveRestoreCursors {{Cursor 1} {645000 ps} 0}
 quietly wave cursor active 1
 configure wave -namecolwidth 178
 configure wave -valuecolwidth 117
@@ -51,4 +52,4 @@ configure wave -griddelta 40
 configure wave -timeline 0
 configure wave -timelineunits ps
 update
-WaveRestoreZoom {59605 ps} {404013 ps}
+WaveRestoreZoom {546157 ps} {1003634 ps}

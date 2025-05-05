@@ -172,13 +172,15 @@ module ingress_ctrl #(
           header_beat <= fifo_out_d2.last;
           m_axi_wlast <= fifo_out_d2.last;
           
-          if (fifo_out_d2.last && !header_beat) //at the end of the burst, set the next DDR write address
-            ddr_wr_ptr <= ddr_wr_ptr + byte_cnt;
+          if (fifo_out_d2.last) //at the end of the burst, set the next DDR write address
+            if (header_beat)
+              ddr_wr_ptr <= ddr_wr_ptr + byte_cnt_next;
+            else
+              ddr_wr_ptr <= ddr_wr_ptr + byte_cnt;
 
           //if writing header
           if (header_beat) begin
-
-            m_axi_awaddr <= m_axi_awaddr + byte_cnt; //The DDR address = the last address + the number of bytes taken by the last packet
+            m_axi_awaddr <= ddr_wr_ptr;
             m_axi_awvalid <= 1;
             //Always write the entire 512 bit word into DDR as if all bytes are valid
             //store the number of bytes to be taken by the current packet

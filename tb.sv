@@ -86,6 +86,13 @@ module tb;
     m_axi_wready  <= 1;
 
     reset();
+    @(posedge clk);
+    //back to back packets
+    send_pkt(16'h86dd, 6);
+    send_pkt(16'h0800, 46);
+    send_pkt(16'h86dd, 6);
+    send_pkt(16'h0800, 46);
+    #500;
 
     @(posedge clk);
     send_pkt(16'h0800, 400);
@@ -110,6 +117,12 @@ module tb;
       send_pkt(16'h0800, 46);
     end
 
+    //Just a normal packet
+    repeat (40) @(posedge clk);
+    send_pkt(16'h0800, 1200);
+
+    repeat (20) @(posedge clk);
+
     wait (dut.fifo_empty);
     repeat (10) @(posedge clk);
     if (tx_pkt_cnt != rx_pkt_cnt) $display("Error: Packet counts do not match at time %0t", $time);
@@ -119,6 +132,7 @@ module tb;
 
   initial begin
     m_axi_wready <= 1;
+    #500;
     @(posedge m_axi_wvalid);
     repeat (100) begin
       @(posedge clk);
