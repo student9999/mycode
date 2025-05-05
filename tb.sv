@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 module tb;
 
-  parameter ADDR_WIDTH = 32;
+  parameter ADDR_WIDTH = 31;
   parameter DATA_WIDTH = 512;
   parameter ID_WIDTH = 4;
   parameter BEAT_BYTES = DATA_WIDTH / 8;
@@ -31,12 +31,14 @@ module tb;
   bit start_pushback = 0;
   bit [15:0] tx_pkt_cnt = 0;
   bit [15:0] rx_pkt_cnt = 0;
+  bit [15:0] dut_pkt_cnt;
 
-  pkt_mod_store #(
+  ingress_ctrl #(
       .ADDR_WIDTH(ADDR_WIDTH),
       .DATA_WIDTH(DATA_WIDTH),
       .ID_WIDTH  (ID_WIDTH)
   ) dut (
+      .pkt_cnt(dut_pkt_cnt),
       .*
   );
 

@@ -1,5 +1,5 @@
 module ingress_ctrl #(
-    parameter ADDR_WIDTH = 32,
+    parameter ADDR_WIDTH = 31, //Use 2GB of DDR
     parameter DATA_WIDTH = 512,
     parameter ID_WIDTH = 4,
     parameter BUFFER_DEPTH = 2048  //in bytes
@@ -24,7 +24,10 @@ module ingress_ctrl #(
     output logic m_axi_wlast,
     output logic m_axi_wvalid,
     input logic m_axi_wready,
-    output logic m_axi_bready
+    output logic m_axi_bready,
+
+    //status
+    output logic [31:0] pkt_cnt //# of valid packets detected
 );
   localparam FEP_HEADER = 48'h1eadfeb5ac0d;  //customer header field
   localparam BEAT_BYTES = DATA_WIDTH / 8;  //# of bytes in a beat
@@ -45,8 +48,8 @@ module ingress_ctrl #(
   logic fifo_full, fifo_empty;
   assign fifo_full  = (wr_ptr + 1 == rd_ptr);
   assign fifo_empty = (rd_ptr == wr_ptr);
-
-  logic [15:0] byte_cnt;  //# of DDR bytes taken by the current packet
+  logic [15:0] byte_cnt_next; //# of DDR bytes needed to store the current packet
+  logic [15:0] byte_cnt;
   logic [15:0] pkt_length_ipv4;
   logic [15:0] pkt_length_ipv6;
   logic [15:0] pkt_length_in;
@@ -62,6 +65,7 @@ module ingress_ctrl #(
   fifo_entry_t fifo_out_d0;
   fifo_entry_t fifo_out_d1;
   fifo_entry_t fifo_out_d2;
+  logic [ADDR_WIDTH-1:0] ddr_wr_ptr;
 
   //13th and 14th bytes of the packet are the EtherType
   assign ether_type = {s_axis_tdata[13*8-1-:8], s_axis_tdata[14*8-1-:8]};
@@ -90,11 +94,13 @@ module ingress_ctrl #(
       wr_ptr <= 0;
       pkt_valid <= '0;
       pkt_dropping <= '0;
+      pkt_cnt <= '0;
     end else begin
       if (s_axis_tvalid && !fifo_full) begin
         if (!pkt_valid && !pkt_dropping) begin //neither of these flags is set means this is the first beat of a new packet
           if (hdr_chk_pass) begin
             pkt_valid <= '1;
+            pkt_cnt <= pkt_cnt + 1;
             //replace MAC address with TMRed packet length and FEP header
             fifo[wr_ptr].data <= {
               s_axis_tdata[DATA_WIDTH-1:96], FEP_HEADER, pkt_length_in, pkt_length_in, pkt_length_in
@@ -139,8 +145,9 @@ module ingress_ctrl #(
   // address beat and first data beat are at the same time
   // assume writes are always successful
   assign pkt_length_out = fifo_out_d2.data[15:0];
+  assign byte_cnt_next = ((pkt_length_out + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;
   assign m_axi_wstrb = '1; //always write the entire 512 bit word into DDR as if all bytes are valid
-
+  
   always_ff @(posedge clk)
     if (rst) begin
       rd_ptr <= '0;
@@ -151,6 +158,7 @@ module ingress_ctrl #(
       m_axi_wlast <= '0;
       header_beat <= '1;
       fifo_dout_valid <= '0;
+      ddr_wr_ptr <= '0;
     end else begin
       if (m_axi_wready) begin
 
@@ -163,6 +171,9 @@ module ingress_ctrl #(
         if (fifo_dout_valid[2]) begin
           header_beat <= fifo_out_d2.last;
           m_axi_wlast <= fifo_out_d2.last;
+          
+          if (fifo_out_d2.last && !header_beat) //at the end of the burst, set the next DDR write address
+            ddr_wr_ptr <= ddr_wr_ptr + byte_cnt;
 
           //if writing header
           if (header_beat) begin
@@ -170,8 +181,8 @@ module ingress_ctrl #(
             m_axi_awaddr <= m_axi_awaddr + byte_cnt; //The DDR address = the last address + the number of bytes taken by the last packet
             m_axi_awvalid <= 1;
             //Always write the entire 512 bit word into DDR as if all bytes are valid
-            //calculate the number of address spaces taken by the current packet
-            byte_cnt <= ((pkt_length_out + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;
+            //store the number of bytes to be taken by the current packet
+            byte_cnt <= byte_cnt_next;
           end else begin  //writing non-header
             m_axi_awvalid <= '0;
           end
@@ -187,5 +198,9 @@ module ingress_ctrl #(
         m_axi_awlen <= (pkt_length_out + BEAT_BYTES - 1) / BEAT_BYTES - 1;
       end
     end
+
+//Use DDR as a FIFO
+  
+  
 
 endmodule

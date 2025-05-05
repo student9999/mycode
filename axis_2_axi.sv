@@ -151,7 +151,7 @@ always_ff @(posedge clk) begin
       m_axi_wvalid <= '0;
       tx_rd_ptr <='0;
       tx_byte_cnt <= 0;
-      m_axi_wlast <= '0';
+      m_axi_wlast <= '0;
     end
   endcase
   //RAM latency = 2
