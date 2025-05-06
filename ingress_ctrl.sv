@@ -12,7 +12,6 @@ module ingress_ctrl #(
     output logic s_axis_tready,
     input logic s_axis_tlast,
     //AXI4 write transaction to DDR
-    output logic [ID_WIDTH-1:0] m_axi_awid,
     output logic [ADDR_WIDTH-1:0] m_axi_awaddr,
     output logic [7:0] m_axi_awlen,
     output logic [2:0] m_axi_awsize,
@@ -25,8 +24,26 @@ module ingress_ctrl #(
     output logic m_axi_wvalid,
     input logic m_axi_wready,
     output logic m_axi_bready,
-
-    //status
+    //DDR reads
+    output logic [ID_WIDTH-1:0] m_axi_arid,
+    output logic [ADDR_WIDTH-1:0] m_axi_araddr,
+    output logic [7:0] m_axi_arlen,
+    output logic [2:0] m_axi_arsize,
+    output logic [1:0] m_axi_arburst,
+    output logic m_axi_arvalid,
+    input logic m_axi_arready,
+    input logic [DATA_WIDTH-1:0] m_axi_rdata,
+    input logic m_axi_rlast,
+    input logic m_axi_rvalid,
+    output logic m_axi_rready,
+    //AXI4S write transaction to AMPER
+    output logic [DATA_WIDTH-1:0] m_axis_tdata,
+    output logic m_axis_tvalid,
+    input logic m_axis_tready,
+    output logic m_axis_tlast,
+    output logic [(DATA_WIDTH/8)-1:0] m_axis_tkeep,
+    //CSR
+    input logic en, //1 to enable DDR read
     output logic [31:0] pkt_cnt //# of valid packets detected
 );
   localparam FEP_HEADER = 48'h1eadfeb5ac0d;  //customer header field
@@ -65,7 +82,11 @@ module ingress_ctrl #(
   fifo_entry_t fifo_out_d0;
   fifo_entry_t fifo_out_d1;
   fifo_entry_t fifo_out_d2;
+  logic fifo_rd_en;
   logic [ADDR_WIDTH-1:0] ddr_wr_ptr;
+  logic [ADDR_WIDTH-1:0] ddr_rd_ptr;
+  logic ddr_empty;
+  logic ddr_full;
 
   //13th and 14th bytes of the packet are the EtherType
   assign ether_type = {s_axis_tdata[13*8-1-:8], s_axis_tdata[14*8-1-:8]};
@@ -81,7 +102,6 @@ module ingress_ctrl #(
   //MRMAC doesn't include the CRC, so minus 4                      
   assign pkt_length_in = is_ipv4 ? pkt_length_ipv4 - 4 : pkt_length_ipv6 - 4;
 
-  assign m_axi_awid = '0;
   assign m_axi_awburst = 2'b01;
   assign m_axi_awsize = $clog2(BEAT_BYTES);
   assign m_axi_bready = 1;  //don't care about the response
@@ -140,14 +160,15 @@ module ingress_ctrl #(
     end
   end
 
-  // Burst write output logic
+  // DDR Burst write output logic
   // can do back to back burst writes
   // address beat and first data beat are at the same time
   // assume writes are always successful
   assign pkt_length_out = fifo_out_d2.data[15:0];
   assign byte_cnt_next = ((pkt_length_out + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;
   assign m_axi_wstrb = '1; //always write the entire 512 bit word into DDR as if all bytes are valid
-  
+  assign fifo_rd_en = ~fifo_empty && ~ddr_full;
+
   always_ff @(posedge clk)
     if (rst) begin
       rd_ptr <= '0;
@@ -162,9 +183,9 @@ module ingress_ctrl #(
     end else begin
       if (m_axi_wready) begin
 
-        if (~fifo_empty) rd_ptr <= rd_ptr + 1;
+        if (fifo_rd_en) rd_ptr <= rd_ptr + 1;
 
-        fifo_dout_valid[2:0] <= {fifo_dout_valid[1:0], ~fifo_empty};  //match the FIFO read latency
+        fifo_dout_valid[2:0] <= {fifo_dout_valid[1:0], fifo_rd_en};  //match the FIFO read latency
         //put FIFO data on the bus when it is valid
         m_axi_wvalid <= fifo_dout_valid[2];
 
@@ -201,8 +222,27 @@ module ingress_ctrl #(
       end
     end
 
-//Use DDR as a FIFO
-  
-  
+//DDR single read logic
+assign ddr_full = ddr_wr_ptr + 1 == ddr_rd_ptr;
+assign ddr_empty = ddr_wr_ptr == ddr_rd_ptr;
+
+assign m_axi_arvalid = en && !ddr_empty;
+assign m_axi_arid     = 4'd0;
+assign m_axi_arlen    = 8'd0; // Single transfer
+assign m_axi_arsize   = $clog2(DATA_WIDTH / 8);
+assign m_axi_arburst  = 2'b01; // INCR burst
+assign m_axi_araddr   = ddr_rd_ptr;
+//increment address when the read transaction is accepted by DDRMC
+always_ff @(posege clk)
+  if (rst)
+    ddr_rd_ptr <= '0;
+  else
+    if (m_axi_arready)
+      ddr_rd_ptr <= ddr_rd_ptr + BEAT_BYTES;
+//accept DDR read data when the AMPER is ready to take the data
+assign m_axi_rready = m_axis_tready;
+
+//Output to AMPER via AXIS
+assign m_axis_tvalid = m_axi_rvalid;
 
 endmodule
