@@ -1,7 +1,6 @@
 module ingress_ctrl #(
     parameter ADDR_WIDTH = 31, //Use 2GB of DDR
     parameter DATA_WIDTH = 512,
-    parameter ID_WIDTH = 4,
     parameter BUFFER_DEPTH = 2048  //in bytes
 ) (
     input logic clk,
@@ -25,7 +24,6 @@ module ingress_ctrl #(
     input logic m_axi_wready,
     output logic m_axi_bready,
     //DDR reads
-    output logic [ID_WIDTH-1:0] m_axi_arid,
     output logic [ADDR_WIDTH-1:0] m_axi_araddr,
     output logic [7:0] m_axi_arlen,
     output logic [2:0] m_axi_arsize,
@@ -94,6 +92,10 @@ logic ddr_empty;
 logic ddr_full;
 logic find_header;
 logic [$clog2(MAX_BEAT_CNT)-1:0] beat_cnt;
+logic [$clog2(MAX_BEAT_CNT)-1:0] beat_left;
+logic [$clog2(BEAT_BYTES)-1:0] byte_in_last_beat;
+logic [BEAT_BYTES-1:0] byte_valid;
+logic [BEAT_BYTES-1:0] byte_valid_save;
 
 //13th and 14th bytes of the packet are the EtherType
 assign ether_type = {s_axis_tdata[13*8-1-:8], s_axis_tdata[14*8-1-:8]};
@@ -187,7 +189,7 @@ always_ff @(posedge clk)
     fifo_dout_valid <= '0;
     ddr_wr_ptr <= '0;
   end else begin
-    if (m_axi_wready) begin
+    if (m_axi_wready&&m_axi_awready) begin
       if (fifo_rd_en) 
         rd_ptr <= rd_ptr + 1;
       
@@ -232,14 +234,13 @@ assign ddr_full = ddr_wr_ptr + 1 == ddr_rd_ptr;
 assign ddr_empty = ddr_wr_ptr == ddr_rd_ptr;
 
 assign m_axi_arvalid = ddr_rd_en && !ddr_empty;
-assign m_axi_arid     = 4'd0;
 assign m_axi_arlen    = 8'd0; // Single transfer
 assign m_axi_arsize   = $clog2(DATA_WIDTH / 8);
 assign m_axi_arburst  = 2'b01; // INCR burst
 assign m_axi_araddr   = ddr_rd_ptr;
 
 //increment address when the read transaction is accepted by DDRMC
-always_ff @(posege clk)
+always_ff @(posedge clk)
   if (rst)
     ddr_rd_ptr <= '0;
   else
@@ -257,24 +258,29 @@ assign pkt_length_voted = (pkt_length_ddr[0] & pkt_length_ddr[1]) |
                           (pkt_length_ddr[1] & pkt_length_ddr[2]) |
                           (pkt_length_ddr[0] & pkt_length_ddr[2]);
 assign beat_cnt = (pkt_length_voted + BEAT_BYTES - 1) / BEAT_BYTES;
+assign byte_in_last_beat = pkt_length_voted % BEAT_BYTES;
+assign byte_valid = {BEAT_BYTES{1'b1}} >> (BEAT_BYTES - byte_in_last_beat);
 assign fep_match =  FEP_HEADER == m_axi_rdata[95:48];
 
 assign m_axis_tvalid = m_axi_rvalid;
 assign m_axis_tlast = find_header ? beat_cnt<2 : beat_left == 0;
+assign m_axis_tkeep = find_header && beat_left == 0 ? byte_valid_save : byte_valid;
 
 //search for the header beat
-always_ff @(posege clk)
+always_ff @(posedge clk)
   if (rst) begin
     find_header <= '1;
     beat_left <= '0;
+    byte_valid_save <= '1;
     end
   else
     if (m_axi_rvalid && m_axis_tready)
       if (find_header)
         begin
         beat_left <= beat_cnt-1;
+        byte_valid_save <= byte_valid;
         if (fep_match)
-          find_header <= beat_cnt < 2; //keep finding header if the current packet has less than 2 beats
+          find_header <= beat_cnt < 2; //keep looking for the next header if the current packet has 1 beat
         end
       else
         begin
