@@ -260,6 +260,7 @@ assign beat_cnt = (pkt_length_voted + BEAT_BYTES - 1) / BEAT_BYTES;
 assign fep_match =  FEP_HEADER == m_axi_rdata[95:48];
 
 assign m_axis_tvalid = m_axi_rvalid;
+assign m_axis_tlast = find_header ? beat_cnt<2 : beat_left == 0;
 
 //search for the header beat
 always_ff @(posege clk)
