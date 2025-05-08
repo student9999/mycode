@@ -60,6 +60,7 @@ assign s_axis_tready = pld_valid || !packet_ready || rd_buf_sel != wr_buf_sel;
 
 //receive packets from the AXI stream interface
 //back to back packets are supported
+//address cycle and data cycle are combined
 always_ff @(posedge clk)
  if (rst) begin
   pld_valid <= '0;
@@ -67,7 +68,7 @@ always_ff @(posedge clk)
   packet_ready <= '0;
   wr_buf_sel <= '0;
   rd_buf_sel <= '0;
-end else begin 
+end else begin
   if (s_axis_tvalid && s_axis_tready) begin
     if (~wr_buf_sel)
       buffer0[rx_wr_ptr] <= s_axis_tdata;

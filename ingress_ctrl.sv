@@ -55,6 +55,13 @@ localparam MAX_BEAT_CNT = (MAX_PKT_LENGTH-1-4+BEAT_BYTES-1)/BEAT_BYTES;
 localparam IPV4_LENGTH_OFFSET = 18;  //Ethernet frame header + CRC
 localparam IPV6_LENGTH_OFFSET = 58;  //Ethernet frame header + CRC + Ipv6 header
 
+typedef enum logic [1:0] {
+  DDR_WR_IDLE,
+  DDR_WR_ADDR, //address cycle
+  DDR_WR_DATA, //data cycles
+  DDR_WR_RESP  //response cycle
+} DDR_WR_ST_T;
+
 typedef struct packed {
   logic [DATA_WIDTH-1:0] data;
   logic                  last;
@@ -68,6 +75,8 @@ fifo_entry_t fifo_out_d0;
 fifo_entry_t fifo_out_d1;
 fifo_entry_t fifo_out_d2;
 
+DDR_WR_ST_T ddr_wr_st;
+DDR_WR_ST_T ddr_wr_next_st;
 logic [15:0] byte_cnt_next; //# of DDR bytes needed to store the current packet
 logic [15:0] byte_cnt;
 logic [15:0] pkt_length_ipv4;
@@ -84,7 +93,7 @@ logic hdr_chk_pass;  //current packet is valid
 logic pkt_valid;
 logic pkt_dropping;  //current packet is invalid
 logic header_beat;
-logic [2:0] fifo_dout_valid;
+logic [2:0] fifo_rd_en_d;
 logic fifo_rd_en;
 logic [ADDR_WIDTH-1:0] ddr_wr_ptr;
 logic [ADDR_WIDTH-1:0] ddr_rd_ptr;
@@ -108,14 +117,16 @@ assign is_ipv6 = ether_type == IPV6_TYPE;
 assign hdr_chk_pass = (is_ipv4 && pkt_length_ipv4 > MIN_PKT_LENGTH && pkt_length_ipv4 < MAX_PKT_LENGTH) ||
                       (is_ipv6 && pkt_length_ipv6 > MIN_PKT_LENGTH && pkt_length_ipv6 < MAX_PKT_LENGTH);
 //store the total number of valid bytes in the packet
-//MRMAC doesn't include the CRC, so minus 4                      
+//MRMAC doesn't include the CRC, so minus 4
 assign pkt_length = is_ipv4 ? pkt_length_ipv4 - 4 : pkt_length_ipv6 - 4;
 
 assign m_axi_awburst = 2'b01;
 assign m_axi_awsize = $clog2(BEAT_BYTES);
 assign m_axi_bready = 1;  //don't care about the response
 
+//------------------------------------------------------------------------------
 // Stream input logic. This supports back to back packets
+//------------------------------------------------------------------------------
 assign s_axis_tready = ~fifo_full; //packet is lost if FIFO is full as MRMAC will not stop sending packets
 
 always_ff @(posedge clk) begin
@@ -152,7 +163,7 @@ always_ff @(posedge clk) begin
   end
 end
 
-// Replace this with AMD XPM FIFO
+// Replace these code with a AMD XPM FIFO
 // FIFO read latency = 3
 always_ff @(posedge clk) begin
   if (rst) begin
@@ -160,7 +171,7 @@ always_ff @(posedge clk) begin
     fifo_out_d1 <= '0;
     fifo_out_d2 <= '0;
   end else begin
-    if (m_axi_wready) begin
+    if (m_axi_wready&&m_axi_awready) begin
       fifo_out_d0 <= fifo[rd_ptr];
       fifo_out_d1 <= fifo_out_d0;
       fifo_out_d2 <= fifo_out_d1;
@@ -168,14 +179,82 @@ always_ff @(posedge clk) begin
   end
 end
 
+//------------------------------------------------------------------------------
 // DDR Burst write output logic
+//------------------------------------------------------------------------------
 // can do back to back burst writes
-// address beat and first data beat are at the same time
+// address beat and the first data beat happen at the same time
 // assume writes are always successful
 assign pkt_length_fifo = fifo_out_d2.data[15:0];
 assign byte_cnt_next = ((pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;
 assign m_axi_wstrb = '1; //always write the entire 512 bit word into DDR as if all bytes are valid
 assign fifo_rd_en = ~fifo_empty && ~ddr_full;
+
+always_comb begin
+  ddr_wr_next_st = ddr_wr_st;
+  case(ddr_wr_st)
+    DDR_WR_IDLE: 
+    if (~fifo_empty)
+      ddr_wr_next_st = DDR_WR_ADDR;
+    DDR_WR_ADDR:
+    if (m_axi_awvalid && m_axi_arready)
+      ddr_wr_next_st = DDR_WR_DATA;
+    DDR_WR_DATA:    
+    if (m_axi_wvalid && m_axi_wready && m_axi_wlast)     
+      ddr_wr_next_st = DDR_WR_RESP;
+    DDR_WR_RESP
+    if (m_axi_bvalid)
+      ddr_wr_next_st <= DDR_WR_IDLE;
+    default:
+      ddr_wr_next_st <= DDR_WR_IDLE;
+  end
+
+always_ff @(posedge clk) begin
+  if (rst) begin
+    ddr_wr_st <= DDR_WR_IDLE;
+    fifo_rd_en <= '0;
+    fifo_dout_valid <= '0;
+    m_axi_arvalid <= '0;
+    m_axi_awlen <= '0;
+    m_axi_araddr <= '0;
+    m_axi_wvalid <= '0;
+  end else begin
+    ddr_wr_st <= ddr_wr_next_st;
+    case(ddr_wr_st)
+      DDR_WR_IDLE:
+        if (~fifo_empty)
+          fifo_rd_en <= 1; //single read
+      DDR_WR_ADDR: begin
+        fifo_rd_en <= 0; //pause read to process data
+        fifo_rd_en_d <= {fifo_rd_en_d[1:0], fifo_rd_en}; //match the FIFO read latency
+        if (fifo_rd_en_d[2]) //when data is valid
+          begin
+          m_axi_awlen <= (pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES - 1; //burst length - 1
+          m_axi_araddr <= m_axi_araddr + ((pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;
+          m_axi_arvalid <= 1;
+          end
+        if (m_axi_arvalid && m_axi_arready) begin
+          m_axi_arvalid <= 0;
+          m_axi_wvalid <= 1;
+          end
+        end
+      DDR_WR_HEADER: begin        
+        if (m_axi_wready) begin
+          m_axi_wvalid <= 0;
+          if (~m_axi_wlast && ~fifo_empty)
+            fifo_rd_en <= 1;            
+          end
+          
+          
+      end
+  
+
+    DDR_WR_PYLD //payload beat
+    endcase
+  end
+  m_axi_wdata <= fifo_out_d2.data;
+  m_axi_wlast <= fifo_out_d2.last;
+end
 
 always_ff @(posedge clk)
   if (rst) begin
@@ -189,7 +268,7 @@ always_ff @(posedge clk)
     fifo_dout_valid <= '0;
     ddr_wr_ptr <= '0;
   end else begin
-    if (m_axi_wready&&m_axi_awready) begin
+    if (m_axi_wready && m_axi_awready) begin
       if (fifo_rd_en) 
         rd_ptr <= rd_ptr + 1;
       
