@@ -27,6 +27,26 @@ module tb;
   logic [ID_WIDTH-1:0] m_axi_bid;
   logic [1:0] m_axi_bresp;
   logic m_axi_bready;
+  logic m_axi_bvalid=1;
+
+  logic [ADDR_WIDTH-1:0] m_axi_araddr;
+  logic [7:0] m_axi_arlen;
+  logic [2:0] m_axi_arsize;
+  logic [1:0] m_axi_arburst;
+  logic m_axi_arvalid;
+  logic m_axi_arready;
+  logic [DATA_WIDTH-1:0] m_axi_rdata;
+  logic m_axi_rlast;
+  logic m_axi_rvalid;
+  logic m_axi_rready;
+;
+  logic [DATA_WIDTH-1:0] m_axis_tdata;
+  logic m_axis_tvalid;
+  logic m_axis_tready;
+  logic m_axis_tlast;
+  logic [(DATA_WIDTH/8)-1:0] m_axis_tkeep;
+  logic ddr_rd_en; //1 to enable DDR rea
+  logic [31:0] pkt_cnt; //# of valid packets detecte
 
   bit start_pushback = 0;
   bit [15:0] tx_pkt_cnt = 0;
@@ -35,9 +55,8 @@ module tb;
 
   ingress_ctrl #(
       .ADDR_WIDTH(ADDR_WIDTH),
-      .DATA_WIDTH(DATA_WIDTH),
-      .ID_WIDTH  (ID_WIDTH)
-  ) dut (
+      .DATA_WIDTH(DATA_WIDTH))
+  dut (
       .pkt_cnt(dut_pkt_cnt),
       .*
   );
@@ -82,8 +101,7 @@ module tb;
   endtask
 
   initial begin
-    m_axi_awready <= 1;
-    m_axi_wready  <= 1;
+    m_axi_awready <= 0;
 
     reset();
     @(posedge clk);
@@ -131,8 +149,7 @@ module tb;
   end
 
   initial begin
-    m_axi_wready <= 1;
-    #500;
+    m_axi_wready <= 0;
     @(posedge m_axi_wvalid);
     repeat (100) begin
       @(posedge clk);
@@ -148,6 +165,18 @@ module tb;
       m_axi_wready <= ~m_axi_wready;
     end
   end
+
+  initial begin
+    m_axi_awready <= 0;
+    @(posedge m_axi_awvalid);
+    repeat (5) @(posedge clk);
+    m_axi_awready <= 1;
+    @(posedge clk);
+    m_axi_awready <= 0;
+    @(posedge clk);
+    m_axi_awready <= 1;
+    end
+
 
   always_ff @(posedge clk)
     if (m_axi_wvalid && m_axi_wready && m_axi_wlast)

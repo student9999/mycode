@@ -178,10 +178,12 @@ always_ff @(posedge clk) begin
     fifo_out_d2 <= '0;
     rd_ptr <= '0;
   end else begin
-    if (fifo_rd_en) begin
+    if (fifo_rd_en)
       fifo_out_d0 <= fifo[rd_ptr];
-      fifo_out_d1 <= fifo_out_d0;
-      fifo_out_d2 <= fifo_out_d1;
+    if (ddr_wr_st==DDR_WR_BURST && m_axi_wready || ddr_wr_st!=DDR_WR_BURST)
+    begin
+    fifo_out_d1 <= fifo_out_d0;
+    fifo_out_d2 <= fifo_out_d1;
     end
     if (fifo_rd_en)
       rd_ptr <= rd_ptr+1; 
@@ -208,11 +210,14 @@ always_comb begin
     if (~fifo_empty)
       ddr_wr_next_st = DDR_WR_ADDR;
     DDR_WR_ADDR:
-    if (m_axi_awvalid && m_axi_arready)
+    if (m_axi_awvalid && m_axi_awready)
       ddr_wr_next_st = DDR_WR_HEADER;
     DDR_WR_HEADER:
       if (m_axi_wready)
-        ddr_wr_next_st = DDR_WR_WAIT;        
+        if (wr_beat_cnt<2)
+          ddr_wr_next_st = DDR_WR_RESP;
+        else 
+          ddr_wr_next_st = DDR_WR_WAIT;        
     DDR_WR_WAIT:
       if (fifo_rd_req_d[2])
         ddr_wr_next_st = DDR_WR_BURST;
@@ -231,8 +236,8 @@ always_ff @(posedge clk) begin
   if (rst) begin
     ddr_wr_st <= DDR_WR_IDLE;
     fifo_rd_req <= '0;
-    m_axi_arvalid <= '0;
-    m_axi_araddr <= '0;
+    m_axi_awvalid <= '0;
+    m_axi_awaddr <= '0;
     m_axi_wvalid <= '0;
     wr_beat_left <= '0;
   end else begin
@@ -246,13 +251,13 @@ always_ff @(posedge clk) begin
         fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req}; //match the FIFO read latency
         if (fifo_rd_req_d[2]) //when data is valid, output to the bus
           begin
-          m_axi_araddr <= m_axi_araddr + wr_beat_cnt * BEAT_BYTES;
-          m_axi_arvalid <= 1;
+          m_axi_awvalid <= 1;
           wr_beat_left <= wr_beat_cnt;
           end
-        if (m_axi_arvalid && m_axi_arready) begin
-          m_axi_arvalid <= 0; //address cycle ends
+        if (m_axi_awvalid && m_axi_awready) begin
+          m_axi_awvalid <= 0; //address cycle ends
           m_axi_wvalid <= 1;
+          m_axi_awaddr <= m_axi_awaddr + wr_beat_cnt * BEAT_BYTES; //prepare for next packet
           end
         end
       DDR_WR_HEADER: begin
@@ -266,30 +271,32 @@ always_ff @(posedge clk) begin
         end  
       DDR_WR_WAIT: begin
         fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req};
-        if (wr_beat_left>0)
+        if (wr_beat_left>1)
           wr_beat_left <= wr_beat_left - 1;
         else
-          fifo_rd_en <= 0;
+          fifo_rd_req <= 0;
         if (fifo_rd_req_d[2])
           m_axi_wvalid <= 1;
         end  
       DDR_WR_BURST: begin//payload beat
         //FIFO should not become empty
-        if (m_axi_wready && wr_beat_left>0) begin
-          wr_beat_left <= wr_beat_left - 1;
-          fifo_rd_req <= 1;
-        end else begin
+        if (m_axi_wready) begin
+          fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req};
+          if(wr_beat_left>1) begin
+            wr_beat_left <= wr_beat_left - 1;
+            fifo_rd_req <= 1;
+          end else
           fifo_rd_req <= 0;
         end
-        if (m_axi_wready)
-          fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req};
         if (m_axi_wready && m_axi_wlast) //wvalid stay high during burst.
           m_axi_wvalid <= 0;
       end       
     endcase
   end
+  if (ddr_wr_st==DDR_WR_BURST && m_axi_wready || ddr_wr_st!=DDR_WR_BURST) begin
   m_axi_wdata <= fifo_out_d2.data;
   m_axi_wlast <= fifo_out_d2.last;
+  end
 end
 /*
 always_ff @(posedge clk)
@@ -348,13 +355,11 @@ always_ff @(posedge clk)
 //DDR single read logic
 assign ddr_full = ddr_wr_ptr + 1 == ddr_rd_ptr;
 assign ddr_empty = ddr_wr_ptr == ddr_rd_ptr;
-
-assign m_axi_arvalid = ddr_rd_en && !ddr_empty;
 assign m_axi_arlen    = 8'd0; // Single transfer
 assign m_axi_arsize   = $clog2(DATA_WIDTH / 8);
 assign m_axi_arburst  = 2'b01; // INCR burst
+assign m_axi_arvalid  = ddr_rd_en && !ddr_empty;
 assign m_axi_araddr   = ddr_rd_ptr;
-
 //increment address when the read transaction is accepted by DDRMC
 always_ff @(posedge clk)
   if (rst)
