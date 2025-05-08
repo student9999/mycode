@@ -1,8 +1,9 @@
 `timescale 1ns / 1ps
 module tb;
 
-  parameter ADDR_WIDTH = 16;
+  parameter ADDR_WIDTH = 31;
   parameter DATA_WIDTH = 512;
+  parameter ID_WIDTH = 4;
   parameter BEAT_BYTES = DATA_WIDTH / 8;
 
   logic clk;
@@ -11,6 +12,7 @@ module tb;
   logic s_axis_tvalid;
   logic s_axis_tready;
   logic s_axis_tlast;
+  logic [ID_WIDTH-1:0] m_axi_awid;
   logic [ADDR_WIDTH-1:0] m_axi_awaddr;
   logic [7:0] m_axi_awlen;
   logic [2:0] m_axi_awsize;
@@ -22,54 +24,22 @@ module tb;
   logic m_axi_wlast;
   logic m_axi_wvalid;
   logic m_axi_wready;
+  logic [ID_WIDTH-1:0] m_axi_bid;
   logic [1:0] m_axi_bresp;
   logic m_axi_bready;
-
-  logic [ADDR_WIDTH-1:0] m_axi_araddr;
-  logic [7:0] m_axi_arlen;
-  logic [2:0] m_axi_arsize;
-  logic [1:0] m_axi_arburst;
-  logic m_axi_arvalid;
-  logic m_axi_arready;
-  logic [DATA_WIDTH-1:0] m_axi_rdata;
-  logic m_axi_rlast;
-  logic m_axi_rvalid;
-  logic m_axi_rready;
-  logic [DATA_WIDTH-1:0] m_axis_tdata;
-  logic m_axis_tvalid;
-  logic m_axis_tready;
-  logic m_axis_tlast;
-  logic [(DATA_WIDTH/8)-1:0] m_axis_tkeep;
-  
-  bit ddr_rd_en = 0; //1 to enable DDR read
 
   bit start_pushback = 0;
   bit [15:0] tx_pkt_cnt = 0;
   bit [15:0] rx_pkt_cnt = 0;
-  bit [31:0] dut_pkt_cnt;
+  bit [15:0] dut_pkt_cnt;
 
   ingress_ctrl #(
       .ADDR_WIDTH(ADDR_WIDTH),
-      .DATA_WIDTH(DATA_WIDTH)
+      .DATA_WIDTH(DATA_WIDTH),
+      .ID_WIDTH  (ID_WIDTH)
   ) dut (
       .pkt_cnt(dut_pkt_cnt),
       .*
-  );
-
-  ddrmc_sim u_ddrmc_sim (
-    .ACLK(clk),
-    .ARESET(rst),
-    .AWID(4'b0), .AWADDR(m_axi_awaddr), .AWLEN(m_axi_awlen),
-    .AWSIZE(m_axi_awsize), .AWBURST(m_axi_awburst),
-    .AWVALID(m_axi_awvalid), .AWREADY(m_axi_awready),
-    .WDATA(m_axi_wdata), .WSTRB(m_axi_wstrb),
-    .WLAST(m_axi_wlast), .WVALID(m_axi_wvalid), .WREADY(m_axi_wready),
-    .BID(), .BRESP(), .BVALID(), .BREADY(m_axi_bready),
-    .ARID(0), .ARADDR(m_axi_araddr), .ARLEN(m_axi_arlen),
-    .ARSIZE(m_axi_arsize), .ARBURST(m_axi_arburst),
-    .ARVALID(m_axi_arvalid), .ARREADY(m_axi_arready),
-    .RID(), .RDATA(m_axi_rdata), .RRESP(),
-    .RLAST(m_axi_rlast), .RVALID(m_axi_rvalid), .RREADY(m_axi_rready)
   );
 
   initial begin
@@ -112,6 +82,9 @@ module tb;
   endtask
 
   initial begin
+    m_axi_awready <= 1;
+    m_axi_wready  <= 1;
+
     reset();
     @(posedge clk);
     //back to back packets
@@ -153,12 +126,27 @@ module tb;
     wait (dut.fifo_empty);
     repeat (10) @(posedge clk);
     if (tx_pkt_cnt != rx_pkt_cnt) $display("Error: Packet counts do not match at time %0t", $time);
-    
-    @(posedge clk);
-    ddr_rd_en <= 1;
-
-    #5000;
+    #1000;
     $finish;
+  end
+
+  initial begin
+    m_axi_wready <= 1;
+    #500;
+    @(posedge m_axi_wvalid);
+    repeat (100) begin
+      @(posedge clk);
+      m_axi_wready <= ~m_axi_wready;
+    end
+
+    @(posedge clk);
+    m_axi_wready <= 1;
+
+    @(start_pushback);
+    repeat (100) begin
+      @(posedge clk);
+      m_axi_wready <= ~m_axi_wready;
+    end
   end
 
   always_ff @(posedge clk)

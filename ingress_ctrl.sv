@@ -23,6 +23,7 @@ module ingress_ctrl #(
     output logic m_axi_wvalid,
     input logic m_axi_wready,
     output logic m_axi_bready,
+    input logic m_axi_bvalid,
     //DDR reads
     output logic [ADDR_WIDTH-1:0] m_axi_araddr,
     output logic [7:0] m_axi_arlen,
@@ -55,10 +56,12 @@ localparam MAX_BEAT_CNT = (MAX_PKT_LENGTH-1-4+BEAT_BYTES-1)/BEAT_BYTES;
 localparam IPV4_LENGTH_OFFSET = 18;  //Ethernet frame header + CRC
 localparam IPV6_LENGTH_OFFSET = 58;  //Ethernet frame header + CRC + Ipv6 header
 
-typedef enum logic [1:0] {
+typedef enum logic [2:0] {
   DDR_WR_IDLE,
   DDR_WR_ADDR, //address cycle
-  DDR_WR_DATA, //data cycles
+  DDR_WR_HEADER, //first data cycle
+  DDR_WR_WAIT, //wait FIFO 
+  DDR_WR_BURST, //burst data
   DDR_WR_RESP  //response cycle
 } DDR_WR_ST_T;
 
@@ -93,15 +96,18 @@ logic hdr_chk_pass;  //current packet is valid
 logic pkt_valid;
 logic pkt_dropping;  //current packet is invalid
 logic header_beat;
-logic [2:0] fifo_rd_en_d;
+logic fifo_rd_req;
+logic [2:0] fifo_rd_req_d;
 logic fifo_rd_en;
 logic [ADDR_WIDTH-1:0] ddr_wr_ptr;
 logic [ADDR_WIDTH-1:0] ddr_rd_ptr;
 logic ddr_empty;
 logic ddr_full;
 logic find_header;
-logic [$clog2(MAX_BEAT_CNT)-1:0] beat_cnt;
-logic [$clog2(MAX_BEAT_CNT)-1:0] beat_left;
+logic [$clog2(MAX_BEAT_CNT)-1:0] wr_beat_cnt;
+logic [$clog2(MAX_BEAT_CNT)-1:0] wr_beat_left;
+logic [$clog2(MAX_BEAT_CNT)-1:0] rd_beat_cnt;
+logic [$clog2(MAX_BEAT_CNT)-1:0] rd_beat_left;
 logic [$clog2(BEAT_BYTES)-1:0] byte_in_last_beat;
 logic [BEAT_BYTES-1:0] byte_valid;
 logic [BEAT_BYTES-1:0] byte_valid_save;
@@ -170,25 +176,30 @@ always_ff @(posedge clk) begin
     fifo_out_d0 <= '0;
     fifo_out_d1 <= '0;
     fifo_out_d2 <= '0;
+    rd_ptr <= '0;
   end else begin
-    if (m_axi_wready&&m_axi_awready) begin
+    if (fifo_rd_en) begin
       fifo_out_d0 <= fifo[rd_ptr];
       fifo_out_d1 <= fifo_out_d0;
       fifo_out_d2 <= fifo_out_d1;
     end
+    if (fifo_rd_en)
+      rd_ptr <= rd_ptr+1; 
   end
 end
 
 //------------------------------------------------------------------------------
 // DDR Burst write output logic
 //------------------------------------------------------------------------------
-// can do back to back burst writes
-// address beat and the first data beat happen at the same time
-// assume writes are always successful
+// can not do back burst writes
+// Separate address cycle and data cycle
+// Expect write response
 assign pkt_length_fifo = fifo_out_d2.data[15:0];
-assign byte_cnt_next = ((pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;
+assign wr_beat_cnt = ((pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES);
+assign byte_cnt_next = wr_beat_cnt * BEAT_BYTES;
 assign m_axi_wstrb = '1; //always write the entire 512 bit word into DDR as if all bytes are valid
-assign fifo_rd_en = ~fifo_empty && ~ddr_full;
+assign m_axi_awlen = wr_beat_cnt - 1; //burst length - 1
+assign fifo_rd_en = ddr_wr_st == DDR_WR_BURST ? m_axi_wready && fifo_rd_req : fifo_rd_req;
 
 always_comb begin
   ddr_wr_next_st = ddr_wr_st;
@@ -198,64 +209,89 @@ always_comb begin
       ddr_wr_next_st = DDR_WR_ADDR;
     DDR_WR_ADDR:
     if (m_axi_awvalid && m_axi_arready)
-      ddr_wr_next_st = DDR_WR_DATA;
-    DDR_WR_DATA:    
+      ddr_wr_next_st = DDR_WR_HEADER;
+    DDR_WR_HEADER:
+      if (m_axi_wready)
+        ddr_wr_next_st = DDR_WR_WAIT;        
+    DDR_WR_WAIT:
+      if (fifo_rd_req_d[2])
+        ddr_wr_next_st = DDR_WR_BURST;
+    DDR_WR_BURST:    
     if (m_axi_wvalid && m_axi_wready && m_axi_wlast)     
       ddr_wr_next_st = DDR_WR_RESP;
-    DDR_WR_RESP
+    DDR_WR_RESP:
     if (m_axi_bvalid)
       ddr_wr_next_st <= DDR_WR_IDLE;
     default:
       ddr_wr_next_st <= DDR_WR_IDLE;
-  end
+  endcase
+end
 
 always_ff @(posedge clk) begin
   if (rst) begin
     ddr_wr_st <= DDR_WR_IDLE;
-    fifo_rd_en <= '0;
-    fifo_dout_valid <= '0;
+    fifo_rd_req <= '0;
     m_axi_arvalid <= '0;
-    m_axi_awlen <= '0;
     m_axi_araddr <= '0;
     m_axi_wvalid <= '0;
+    wr_beat_left <= '0;
   end else begin
     ddr_wr_st <= ddr_wr_next_st;
     case(ddr_wr_st)
       DDR_WR_IDLE:
         if (~fifo_empty)
-          fifo_rd_en <= 1; //single read
+          fifo_rd_req <= 1; //single read
       DDR_WR_ADDR: begin
-        fifo_rd_en <= 0; //pause read to process data
-        fifo_rd_en_d <= {fifo_rd_en_d[1:0], fifo_rd_en}; //match the FIFO read latency
-        if (fifo_rd_en_d[2]) //when data is valid
+        fifo_rd_req <= 0; //pause read to process data
+        fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req}; //match the FIFO read latency
+        if (fifo_rd_req_d[2]) //when data is valid, output to the bus
           begin
-          m_axi_awlen <= (pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES - 1; //burst length - 1
-          m_axi_araddr <= m_axi_araddr + ((pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES) * BEAT_BYTES;
+          m_axi_araddr <= m_axi_araddr + wr_beat_cnt * BEAT_BYTES;
           m_axi_arvalid <= 1;
+          wr_beat_left <= wr_beat_cnt;
           end
         if (m_axi_arvalid && m_axi_arready) begin
-          m_axi_arvalid <= 0;
+          m_axi_arvalid <= 0; //address cycle ends
           m_axi_wvalid <= 1;
           end
         end
-      DDR_WR_HEADER: begin        
+      DDR_WR_HEADER: begin
+        fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req}; //match the FIFO read latency
         if (m_axi_wready) begin
           m_axi_wvalid <= 0;
-          if (~m_axi_wlast && ~fifo_empty)
-            fifo_rd_en <= 1;            
+          wr_beat_left <= wr_beat_left-1;
+          if (wr_beat_left>1 && ~fifo_empty)
+            fifo_rd_req <= 1;            
           end
-          
-          
-      end
-  
-
-    DDR_WR_PYLD //payload beat
+        end  
+      DDR_WR_WAIT: begin
+        fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req};
+        if (wr_beat_left>0)
+          wr_beat_left <= wr_beat_left - 1;
+        else
+          fifo_rd_en <= 0;
+        if (fifo_rd_req_d[2])
+          m_axi_wvalid <= 1;
+        end  
+      DDR_WR_BURST: begin//payload beat
+        //FIFO should not become empty
+        if (m_axi_wready && wr_beat_left>0) begin
+          wr_beat_left <= wr_beat_left - 1;
+          fifo_rd_req <= 1;
+        end else begin
+          fifo_rd_req <= 0;
+        end
+        if (m_axi_wready)
+          fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req};
+        if (m_axi_wready && m_axi_wlast) //wvalid stay high during burst.
+          m_axi_wvalid <= 0;
+      end       
     endcase
   end
   m_axi_wdata <= fifo_out_d2.data;
   m_axi_wlast <= fifo_out_d2.last;
 end
-
+/*
 always_ff @(posedge clk)
   if (rst) begin
     rd_ptr <= '0;
@@ -307,6 +343,7 @@ always_ff @(posedge clk)
       m_axi_awlen <= (pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES - 1;
     end
   end
+  */
 
 //DDR single read logic
 assign ddr_full = ddr_wr_ptr + 1 == ddr_rd_ptr;
@@ -336,35 +373,35 @@ assign pkt_length_ddr[2] = m_axi_rdata[47:32];
 assign pkt_length_voted = (pkt_length_ddr[0] & pkt_length_ddr[1]) |
                           (pkt_length_ddr[1] & pkt_length_ddr[2]) |
                           (pkt_length_ddr[0] & pkt_length_ddr[2]);
-assign beat_cnt = (pkt_length_voted + BEAT_BYTES - 1) / BEAT_BYTES;
+assign rd_beat_cnt = (pkt_length_voted + BEAT_BYTES - 1) / BEAT_BYTES;
 assign byte_in_last_beat = pkt_length_voted % BEAT_BYTES;
 assign byte_valid = {BEAT_BYTES{1'b1}} >> (BEAT_BYTES - byte_in_last_beat);
 assign fep_match =  FEP_HEADER == m_axi_rdata[95:48];
 
 assign m_axis_tvalid = m_axi_rvalid;
-assign m_axis_tlast = find_header ? beat_cnt<2 : beat_left == 0;
-assign m_axis_tkeep = find_header && beat_left == 0 ? byte_valid_save : byte_valid;
+assign m_axis_tlast = find_header ? rd_beat_cnt<2 : rd_beat_left == 0;
+assign m_axis_tkeep = find_header && rd_beat_left == 0 ? byte_valid_save : byte_valid;
 
 //search for the header beat
 always_ff @(posedge clk)
   if (rst) begin
     find_header <= '1;
-    beat_left <= '0;
+    rd_beat_left <= '0;
     byte_valid_save <= '1;
     end
   else
     if (m_axi_rvalid && m_axis_tready)
       if (find_header)
         begin
-        beat_left <= beat_cnt-1;
+        rd_beat_left <= rd_beat_cnt-1;
         byte_valid_save <= byte_valid;
         if (fep_match)
-          find_header <= beat_cnt < 2; //keep looking for the next header if the current packet has 1 beat
+          find_header <= rd_beat_cnt < 2; //keep looking for the next header if the current packet has 1 beat
         end
       else
         begin
-        find_header <= beat_left == 0;
-        beat_left <= beat_left - 1;
+        find_header <= rd_beat_left == 0;
+        rd_beat_left <= rd_beat_left - 1;
         end
 
 endmodule
