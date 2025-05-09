@@ -94,8 +94,8 @@ logic is_ipv6;
 logic hdr_chk_pass;  //current packet is valid
 logic pkt_valid;
 logic pkt_dropping;  //current packet is invalid
-logic fifo_rd_req;
-logic [2:0] fifo_rd_req_d;
+logic [2:0]fifo_empty_d;
+logic stall;
 logic fifo_rd_en;
 logic [ADDR_WIDTH-1:0] ddr_wr_ptr;
 logic [ADDR_WIDTH-1:0] ddr_rd_ptr;
@@ -179,7 +179,7 @@ always_ff @(posedge clk) begin
   end else begin
     if (fifo_rd_en)
       fifo_out_d0 <= fifo[rd_ptr];
-    if (ddr_wr_st==DDR_WR_BURST && m_axi_wready || ddr_wr_st!=DDR_WR_BURST)
+    if (~stall)
     begin
     fifo_out_d1 <= fifo_out_d0;
     fifo_out_d2 <= fifo_out_d1;
@@ -192,111 +192,18 @@ end
 //------------------------------------------------------------------------------
 // DDR Burst write output logic
 //------------------------------------------------------------------------------
-// can not do back burst writes
-// Separate address cycle and data cycle
-// Expect write response
-assign pkt_length_out = fifo_out_d2.data[15:0];
-assign wr_beat_cnt = (pkt_length_out + BEAT_BYTES - 1) / BEAT_BYTES;
-assign m_axi_wstrb = '1; //always write the entire 512 bit word into DDR as if all bytes are valid
-assign m_axi_awlen = wr_beat_cnt - 1; //burst length - 1
-assign fifo_rd_en = ddr_wr_st == DDR_WR_BURST ? m_axi_wready && fifo_rd_req && ~fifo_empty : fifo_rd_req && ~fifo_empty;
-
-always_comb begin
-  ddr_wr_next_st = ddr_wr_st;
-  case(ddr_wr_st)
-    DDR_WR_IDLE: 
-    if (~fifo_empty)
-      ddr_wr_next_st = DDR_WR_ADDR;
-    DDR_WR_ADDR:
-    if (m_axi_awvalid && m_axi_awready) //single address write cycle
-      ddr_wr_next_st = DDR_WR_HEADER;
-    DDR_WR_HEADER: //single header cycle
-      if (m_axi_wready)
-        if (wr_beat_cnt==1) //If the packet has 1 beat, no need to wait for payload
-          ddr_wr_next_st = DDR_WR_RESP;
-        else 
-          ddr_wr_next_st = DDR_WR_WAIT;        
-    DDR_WR_WAIT: //wait for FIFO dout to be ready
-      if (fifo_rd_req_d[2])
-        ddr_wr_next_st = DDR_WR_BURST;
-    DDR_WR_BURST:    
-    if (m_axi_wvalid && m_axi_wready && m_axi_wlast)     
-      ddr_wr_next_st = DDR_WR_RESP;
-    DDR_WR_RESP:
-    if (m_axi_bvalid)
-      ddr_wr_next_st <= DDR_WR_IDLE;
-    default:
-      ddr_wr_next_st <= DDR_WR_IDLE;
-  endcase
-end
+assign fifo_rd_en = !fifo_empty && !stall;
+assign stall = m_axi_wvalid & ~m_axi_wready;
+assign m_axi_wvalid = !fifo_empty_d[2];
+assign m_axi_wdata = fifo_out_d2.data;
+assign m_axi_wlast = fifo_out_d2.last;
 
 always_ff @(posedge clk) begin
   if (rst) begin
-    ddr_wr_st <= DDR_WR_IDLE;
-    fifo_rd_req <= '0;
-    m_axi_awvalid <= '0;
-    m_axi_awaddr <= '0;
-    m_axi_wvalid <= '0;
-    wr_beat_left <= '0;
-  end else begin
-    ddr_wr_st <= ddr_wr_next_st;
-    case(ddr_wr_st)
-      DDR_WR_IDLE:
-        if (~fifo_empty)
-          fifo_rd_req <= 1; //single read
-      DDR_WR_ADDR: begin
-        fifo_rd_req <= 0; //pause read to process data
-        fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req}; //match the FIFO read latency
-        if (fifo_rd_req_d[2]) //when data is valid, output to the bus
-          begin
-          m_axi_awvalid <= 1;
-          wr_beat_left <= wr_beat_cnt-1; //-1 because one beat already happened
-          end
-        if (m_axi_awvalid && m_axi_awready) begin //if slave takes the address
-          m_axi_awvalid <= 0; //address cycle ends
-          m_axi_wvalid <= 1; //start header cycle right away
-          m_axi_awaddr <= m_axi_awaddr + wr_beat_cnt * BEAT_BYTES; //prepare for next packet
-          end
-        end
-      DDR_WR_HEADER: begin
-        fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req}; //match the FIFO read latency
-        if (m_axi_wready) begin //if slave accepts the header
-          m_axi_wvalid <= 0;
-          wr_beat_left <= wr_beat_left-1;
-          if (wr_beat_left>0 && ~fifo_empty)
-            fifo_rd_req <= 1;            
-          end
-        end  
-      DDR_WR_WAIT: begin //reading FIFO and wait for FIFO output to be valid
-        fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req};
-        
-        if (wr_beat_left>0 && ~fifo_empty) begin
-          wr_beat_left <= wr_beat_left - 1;
-          fifo_rd_req <= 1;
-          end
-        else
-          fifo_rd_req <= 0;
-        
-        if (fifo_rd_req_d[2])
-          m_axi_wvalid <= 1;
-        end  
-      DDR_WR_BURST: begin//payload beat
-        if (m_axi_wready) begin
-          fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req};
-          if(wr_beat_left>0 && ~fifo_empty) begin
-            wr_beat_left <= wr_beat_left - 1;
-            fifo_rd_req <= 1;
-          end else
-          fifo_rd_req <= 0;
-        end
-        if (m_axi_wready && m_axi_wlast) //wvalid stay high during burst.
-          m_axi_wvalid <= 0;
-      end
-    endcase
-  end
-  if (ddr_wr_st==DDR_WR_BURST && m_axi_wready || ddr_wr_st!=DDR_WR_BURST) begin
-  m_axi_wdata <= fifo_out_d2.data;
-  m_axi_wlast <= fifo_out_d2.last;
+    fifo_empty_d <= '1;
+  end else begin 
+    if (!stall)
+      fifo_empty_d <= {fifo_empty_d[1:0], fifo_empty};
   end
 end
 

@@ -48,12 +48,11 @@ module tb;
   logic m_axis_tlast;
   logic [(DATA_WIDTH/8)-1:0] m_axis_tkeep;
   logic ddr_rd_en; //1 to enable DDR rea
-  logic [31:0] pkt_cnt; //# of valid packets detecte
 
   bit start_pushback = 0;
-  bit [15:0] tx_pkt_cnt = 0;
-  bit [15:0] rx_pkt_cnt = 0;
-  bit [15:0] dut_pkt_cnt;
+  bit [31:0] tx_pkt_cnt = 0;
+  bit [31:0] rx_pkt_cnt = 0;
+  bit [31:0] dut_pkt_cnt;
 
   ingress_ctrl #(
       .ADDR_WIDTH(ADDR_WIDTH),
@@ -85,14 +84,14 @@ module tb;
     for (int i = 0; i < beats; i++) begin
       s_axis_tdata <= $urandom;
       if (i == 0) begin
-        // Set total length field at byte 13 and 14 (big endian)
+        // Set total length field on byte 13 and 14 (big endian)
         s_axis_tdata[14*8-1-:16] <= {pkt_type[7:0], pkt_type[15:8]};
-        // Set total length field at byte 17 and 18 (big endian)
+        // Set total length field on byte 17 and 18 (big endian)
         s_axis_tdata[18*8-1-:16] <= {length_field[7:0], length_field[15:8]};
-        // Set total length field at byte 19 and 20 (big endian)
+        // Set total length field on byte 19 and 20 (big endian)
         s_axis_tdata[20*8-1-:16] <= {length_field[7:0], length_field[15:8]};
-        // test pattern
-        s_axis_tdata[15:0] <= tx_pkt_cnt;
+        // test pattern on byte 15 and 16
+        s_axis_tdata[16*8-1-:16] <= tx_pkt_cnt[15:0];
       end
       if (i == beats - 1) begin
         s_axis_tlast <= 1;
@@ -158,16 +157,16 @@ module tb;
     @(posedge m_axi_wvalid);
     repeat (100) begin
       @(posedge clk);
-      m_axi_wready <= ~m_axi_wready;
+      m_axi_wready <= ~m_axi_wready & m_axi_wvalid;
     end
 
     @(posedge clk);
-    m_axi_wready <= 1;
+    m_axi_wready <= m_axi_wvalid;
 
     @(start_pushback);
-    repeat (100) begin
+    repeat (500) begin
       @(posedge clk);
-      m_axi_wready <= ~m_axi_wready;
+      m_axi_wready <= ~m_axi_wready & m_axi_wvalid;
     end
   end
 
