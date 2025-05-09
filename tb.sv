@@ -5,6 +5,8 @@ module tb;
   parameter DATA_WIDTH = 512;
   parameter ID_WIDTH = 4;
   parameter BEAT_BYTES = DATA_WIDTH / 8;
+  localparam IPV4_TYPE = 16'h0800;
+  localparam IPV6_TYPE = 16'h86dd;
 
   logic clk;
   logic rst;
@@ -72,8 +74,11 @@ module tb;
     rst <= 0;
   endtask
 
-  task send_pkt(input int pkt_type, input int pkt_len);
+  task send_pkt(input int pkt_type, input int pkt_len); //pkt_len is the total packet length (header+payload)
     automatic int beats = (pkt_len + BEAT_BYTES - 1) / BEAT_BYTES;
+    automatic int length_field = pkt_type == IPV4_TYPE ? pkt_len - 14 : 
+                 pkt_type == IPV6_TYPE ? pkt_len - 54 :
+                 pkt_len;
     s_axis_tvalid <= 1;
     s_axis_tlast  <= 0;
 
@@ -83,9 +88,9 @@ module tb;
         // Set total length field at byte 13 and 14 (big endian)
         s_axis_tdata[14*8-1-:16] <= {pkt_type[7:0], pkt_type[15:8]};
         // Set total length field at byte 17 and 18 (big endian)
-        s_axis_tdata[18*8-1-:16] <= {pkt_len[7:0], pkt_len[15:8]};
+        s_axis_tdata[18*8-1-:16] <= {length_field[7:0], length_field[15:8]};
         // Set total length field at byte 19 and 20 (big endian)
-        s_axis_tdata[20*8-1-:16] <= {pkt_len[7:0], pkt_len[15:8]};
+        s_axis_tdata[20*8-1-:16] <= {length_field[7:0], length_field[15:8]};
         // test pattern
         s_axis_tdata[15:0] <= tx_pkt_cnt;
       end
@@ -106,10 +111,10 @@ module tb;
     reset();
     @(posedge clk);
     //back to back packets
-    send_pkt(16'h86dd, 6);
-    send_pkt(16'h0800, 46);
-    send_pkt(16'h86dd, 6);
-    send_pkt(16'h0800, 46);
+    send_pkt(16'h86dd, 64);
+    send_pkt(16'h0800, 64);
+    send_pkt(16'h86dd, 64);
+    send_pkt(16'h0800, 64);
     #500;
 
     @(posedge clk);
@@ -118,21 +123,21 @@ module tb;
     send_pkt(16'h86dd, 800);
     repeat (100) @(posedge clk);
     //back to back packets
-    send_pkt(16'h86dd, 6);
-    send_pkt(16'h0800, 46);
-    send_pkt(16'h86dd, 6);
-    send_pkt(16'h0800, 46);
+    send_pkt(16'h86dd, 64);
+    send_pkt(16'h0800, 64);
+    send_pkt(16'h86dd, 64);
+    send_pkt(16'h0800, 64);
 
     //single beat packet
     repeat (20) @(posedge clk);
-    send_pkt(16'h0800, 61);
+    send_pkt(16'h0800, 64);
     repeat (20) @(posedge clk);
 
     //back to back packets while DDR is pushing back
     start_pushback = 1;
     repeat (50) begin
-      send_pkt(16'h86dd, 6);
-      send_pkt(16'h0800, 46);
+      send_pkt(16'h86dd, 64);
+      send_pkt(16'h0800, 64);
     end
 
     //Just a normal packet
@@ -181,6 +186,12 @@ module tb;
   always_ff @(posedge clk)
     if (m_axi_wvalid && m_axi_wready && m_axi_wlast)
       rx_pkt_cnt <= rx_pkt_cnt + 1;
+
+  initial begin
+    #2ms;
+    $error("Run time passed 2ms!");
+    $finish();
+  end    
 
   initial begin
     $fsdbDumpfile("waves.fsdb");

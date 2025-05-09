@@ -70,22 +70,21 @@ typedef struct packed {
   logic                  last;
 } fifo_entry_t;
 fifo_entry_t fifo[0:BUFFER_WORDS-1];
-logic [$clog2(BUFFER_WORDS)-1:0] wr_ptr, rd_ptr;
+logic [$clog2(BUFFER_WORDS)-1:0] wr_ptr, rd_ptr, wr_ptr_next;
 logic fifo_full, fifo_empty;
-assign fifo_full  = (wr_ptr + 1 == rd_ptr);
-assign fifo_empty = (rd_ptr == wr_ptr);
+assign wr_ptr_next = wr_ptr + 1;
+assign fifo_full  = wr_ptr_next == rd_ptr;
+assign fifo_empty = rd_ptr == wr_ptr;
 fifo_entry_t fifo_out_d0;
 fifo_entry_t fifo_out_d1;
 fifo_entry_t fifo_out_d2;
 
 DDR_WR_ST_T ddr_wr_st;
 DDR_WR_ST_T ddr_wr_next_st;
-logic [15:0] byte_cnt_next; //# of DDR bytes needed to store the current packet
-logic [15:0] byte_cnt;
 logic [15:0] pkt_length_ipv4;
 logic [15:0] pkt_length_ipv6;
-logic [15:0] pkt_length;
-logic [15:0] pkt_length_fifo; //packet length recovered from the output of the FIFO
+logic [15:0] pkt_length_in;
+logic [15:0] pkt_length_out; //packet length recovered from the output of the FIFO
 logic [15:0] pkt_length_ddr[3]; //packet length recovered from the output of the DDR
 logic [15:0] pkt_length_voted;
 logic fep_match;
@@ -95,7 +94,6 @@ logic is_ipv6;
 logic hdr_chk_pass;  //current packet is valid
 logic pkt_valid;
 logic pkt_dropping;  //current packet is invalid
-logic header_beat;
 logic fifo_rd_req;
 logic [2:0] fifo_rd_req_d;
 logic fifo_rd_en;
@@ -124,7 +122,8 @@ assign hdr_chk_pass = (is_ipv4 && pkt_length_ipv4 > MIN_PKT_LENGTH && pkt_length
                       (is_ipv6 && pkt_length_ipv6 > MIN_PKT_LENGTH && pkt_length_ipv6 < MAX_PKT_LENGTH);
 //store the total number of valid bytes in the packet
 //MRMAC doesn't include the CRC, so minus 4
-assign pkt_length = is_ipv4 ? pkt_length_ipv4 - 4 : pkt_length_ipv6 - 4;
+//Valid pkt_length_in range 60 to 1514
+assign pkt_length_in = is_ipv4 ? pkt_length_ipv4 - 4 : pkt_length_ipv6 - 4;
 
 assign m_axi_awburst = 2'b01;
 assign m_axi_awsize = $clog2(BEAT_BYTES);
@@ -149,7 +148,7 @@ always_ff @(posedge clk) begin
           pkt_cnt <= pkt_cnt + 1;
           //replace MAC address with TMRed packet length and FEP header
           fifo[wr_ptr].data <= {
-            s_axis_tdata[DATA_WIDTH-1:96], FEP_HEADER, pkt_length, pkt_length, pkt_length
+            s_axis_tdata[DATA_WIDTH-1:96], FEP_HEADER, pkt_length_in, pkt_length_in, pkt_length_in
           };
           fifo[wr_ptr].last <= s_axis_tlast;
           wr_ptr <= wr_ptr + 1;
@@ -196,12 +195,11 @@ end
 // can not do back burst writes
 // Separate address cycle and data cycle
 // Expect write response
-assign pkt_length_fifo = fifo_out_d2.data[15:0];
-assign wr_beat_cnt = ((pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES);
-assign byte_cnt_next = wr_beat_cnt * BEAT_BYTES;
+assign pkt_length_out = fifo_out_d2.data[15:0];
+assign wr_beat_cnt = (pkt_length_out + BEAT_BYTES - 1) / BEAT_BYTES;
 assign m_axi_wstrb = '1; //always write the entire 512 bit word into DDR as if all bytes are valid
 assign m_axi_awlen = wr_beat_cnt - 1; //burst length - 1
-assign fifo_rd_en = ddr_wr_st == DDR_WR_BURST ? m_axi_wready && fifo_rd_req : fifo_rd_req;
+assign fifo_rd_en = ddr_wr_st == DDR_WR_BURST ? m_axi_wready && fifo_rd_req && ~fifo_empty : fifo_rd_req && ~fifo_empty;
 
 always_comb begin
   ddr_wr_next_st = ddr_wr_st;
@@ -210,15 +208,15 @@ always_comb begin
     if (~fifo_empty)
       ddr_wr_next_st = DDR_WR_ADDR;
     DDR_WR_ADDR:
-    if (m_axi_awvalid && m_axi_awready)
+    if (m_axi_awvalid && m_axi_awready) //single address write cycle
       ddr_wr_next_st = DDR_WR_HEADER;
-    DDR_WR_HEADER:
+    DDR_WR_HEADER: //single header cycle
       if (m_axi_wready)
-        if (wr_beat_cnt<2)
+        if (wr_beat_cnt==1) //If the packet has 1 beat, no need to wait for payload
           ddr_wr_next_st = DDR_WR_RESP;
         else 
           ddr_wr_next_st = DDR_WR_WAIT;        
-    DDR_WR_WAIT:
+    DDR_WR_WAIT: //wait for FIFO dout to be ready
       if (fifo_rd_req_d[2])
         ddr_wr_next_st = DDR_WR_BURST;
     DDR_WR_BURST:    
@@ -252,37 +250,40 @@ always_ff @(posedge clk) begin
         if (fifo_rd_req_d[2]) //when data is valid, output to the bus
           begin
           m_axi_awvalid <= 1;
-          wr_beat_left <= wr_beat_cnt;
+          wr_beat_left <= wr_beat_cnt-1; //-1 because one beat already happened
           end
-        if (m_axi_awvalid && m_axi_awready) begin
+        if (m_axi_awvalid && m_axi_awready) begin //if slave takes the address
           m_axi_awvalid <= 0; //address cycle ends
-          m_axi_wvalid <= 1;
+          m_axi_wvalid <= 1; //start header cycle right away
           m_axi_awaddr <= m_axi_awaddr + wr_beat_cnt * BEAT_BYTES; //prepare for next packet
           end
         end
       DDR_WR_HEADER: begin
         fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req}; //match the FIFO read latency
-        if (m_axi_wready) begin
+        if (m_axi_wready) begin //if slave accepts the header
           m_axi_wvalid <= 0;
           wr_beat_left <= wr_beat_left-1;
-          if (wr_beat_left>1 && ~fifo_empty)
+          if (wr_beat_left>0 && ~fifo_empty)
             fifo_rd_req <= 1;            
           end
         end  
-      DDR_WR_WAIT: begin
+      DDR_WR_WAIT: begin //reading FIFO and wait for FIFO output to be valid
         fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req};
-        if (wr_beat_left>1)
+        
+        if (wr_beat_left>0 && ~fifo_empty) begin
           wr_beat_left <= wr_beat_left - 1;
+          fifo_rd_req <= 1;
+          end
         else
           fifo_rd_req <= 0;
+        
         if (fifo_rd_req_d[2])
           m_axi_wvalid <= 1;
         end  
       DDR_WR_BURST: begin//payload beat
-        //FIFO should not become empty
         if (m_axi_wready) begin
           fifo_rd_req_d <= {fifo_rd_req_d[1:0], fifo_rd_req};
-          if(wr_beat_left>1) begin
+          if(wr_beat_left>0 && ~fifo_empty) begin
             wr_beat_left <= wr_beat_left - 1;
             fifo_rd_req <= 1;
           end else
@@ -290,7 +291,7 @@ always_ff @(posedge clk) begin
         end
         if (m_axi_wready && m_axi_wlast) //wvalid stay high during burst.
           m_axi_wvalid <= 0;
-      end       
+      end
     endcase
   end
   if (ddr_wr_st==DDR_WR_BURST && m_axi_wready || ddr_wr_st!=DDR_WR_BURST) begin
@@ -298,59 +299,6 @@ always_ff @(posedge clk) begin
   m_axi_wlast <= fifo_out_d2.last;
   end
 end
-/*
-always_ff @(posedge clk)
-  if (rst) begin
-    rd_ptr <= '0;
-    byte_cnt <= '0;
-    m_axi_awvalid <= '0;
-    m_axi_awaddr <= '0;
-    m_axi_wvalid <= '0;
-    m_axi_wlast <= '0;
-    header_beat <= '1;
-    fifo_dout_valid <= '0;
-    ddr_wr_ptr <= '0;
-  end else begin
-    if (m_axi_wready && m_axi_awready) begin
-      if (fifo_rd_en) 
-        rd_ptr <= rd_ptr + 1;
-      
-      fifo_dout_valid[2:0] <= {fifo_dout_valid[1:0], fifo_rd_en};  //match the FIFO read latency
-      //put FIFO data on the bus when it is valid
-      m_axi_wvalid <= fifo_dout_valid[2];
-      
-      if (fifo_dout_valid[2]) begin
-        header_beat <= fifo_out_d2.last;
-        m_axi_wlast <= fifo_out_d2.last;
-        
-        if (fifo_out_d2.last) //at the end of the burst, set the next DDR write address
-          if (header_beat)
-            ddr_wr_ptr <= ddr_wr_ptr + byte_cnt_next;
-          else
-            ddr_wr_ptr <= ddr_wr_ptr + byte_cnt;
-        
-        //if writing header
-        if (header_beat) begin
-          m_axi_awaddr <= ddr_wr_ptr;
-          m_axi_awvalid <= 1;
-          //Always write the entire 512 bit word into DDR as if all bytes are valid
-          //store the number of bytes to be taken by the current packet
-          byte_cnt <= byte_cnt_next;
-        end else begin  //writing non-header
-          m_axi_awvalid <= '0;
-        end
-      end else  //FIFO dout is no longer valid
-      begin
-        m_axi_wlast   <= '0;
-        m_axi_awvalid <= '0;
-      end
-    end  //if (rst)
-    if (fifo_dout_valid[2] && m_axi_wready) begin
-      m_axi_wdata <= fifo_out_d2.data;
-      m_axi_awlen <= (pkt_length_fifo + BEAT_BYTES - 1) / BEAT_BYTES - 1;
-    end
-  end
-  */
 
 //DDR single read logic
 assign ddr_full = ddr_wr_ptr + 1 == ddr_rd_ptr;

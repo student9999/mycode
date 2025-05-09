@@ -7,7 +7,7 @@
 set -e 
 
 # Default values
-TOP_MODULE=tb_axis_2_axi
+TOP_MODULE=tb
 TIMESCALE="1ns/1ps"
 
 # VCS and Verdi specific flags
